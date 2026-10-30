@@ -4,8 +4,8 @@ A small window for starting, stopping and checking [mavlink-router](https://gith
 (`mavlink-routerd`). Pick a mode, click **Start**, and the router fans the vehicle link out to QGC, the
 ground-station hub and any other tool over UDP.
 
-The window only has a minimize button; it stays in the dock/taskbar with the state in its title
-("MAVLink Router: running"). **Quit** (or Ctrl+Q) asks for confirmation and stops the router.
+The window title shows the router state ("MAVLink Router: running"). Closing the window (or Ctrl+Q) quits the app
+after a confirmation and stops the router.
 Launching the app again while it's open just brings the existing window to the front.
 
 The router itself runs **detached** under a supervisor, so if the app crashes the link stays up; start the app again

@@ -131,9 +131,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("MAVLink Router")
         self._quitting = False
-        # Minimize only; quitting goes through Quit (it stops the router)
-        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.CustomizeWindowHint
-                            | Qt.WindowType.WindowTitleHint | Qt.WindowType.WindowMinimizeButtonHint)
         self._reported_errors = set()  # each problem pops up once per Start
         self._settings = profiles.load_settings()
         self._router = Router()
@@ -150,7 +147,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.addLayout(columns)
         layout.addLayout(self._build_router_row())
-        layout.addLayout(self._build_quit_row())
+        QShortcut(QKeySequence.StandardKey.Quit, self, activated=self.close)
         self.setCentralWidget(central)
 
         # Fixed width, measured while the (widest) serial-port rows are still
@@ -245,15 +242,6 @@ class MainWindow(QMainWindow):
         grid.addWidget(config_btn, 0, 5)
         return grid
 
-    def _build_quit_row(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        quit_btn = QPushButton("Quit")
-        quit_btn.setToolTip("Exit the app (Ctrl+Q)")
-        quit_btn.clicked.connect(self._on_quit)
-        QShortcut(QKeySequence.StandardKey.Quit, self, activated=self._on_quit)
-        row.addStretch()
-        row.addWidget(quit_btn)
-        return row
 
 
     # --- mode / inputs ------------------------------------------------------
@@ -520,8 +508,7 @@ class MainWindow(QMainWindow):
             self._traffic_row.set(GRAY, "-")
 
     def closeEvent(self, event):
-        # The close button is hidden, but window managers may still close the
-        # window (Alt+F4, or ignoring the hint): treat that as Quit
+        # Closing the window quits the app (with confirmation; stops the router)
         if self._quitting or self._on_quit():
             event.accept()
         else:
