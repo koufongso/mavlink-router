@@ -1,7 +1,9 @@
-"""Start, stop and inspect a detached mavlink-routerd process.
+"""Start, stop and inspect a detached, self-restarting mavlink-routerd.
 
-The router runs in its own session so it outlives this GUI: closing the
-window (or the GUI crashing) never drops the link.
+The app starts supervisor.sh in its own session; it runs mavlink-routerd and
+restarts it whenever it exits (e.g. the serial device was unplugged), waiting
+for the device to come back first. Being detached, it outlives this GUI:
+closing the window (or the GUI crashing) never drops the link.
 """
 
 import os
@@ -10,18 +12,29 @@ import signal
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .profiles import STATE_DIR
 
 BINARY_NAME = "mavlink-routerd"
-PID_FILE = STATE_DIR / "router.pid"
+PID_FILE = STATE_DIR / "supervisor.pid"
 LOG_FILE = STATE_DIR / "router.log"
 CONF_FILE = STATE_DIR / "active.conf"
 # Empty conf dir so system-wide /etc/mavlink-router/config.d files don't
 # silently add endpoints
 CONF_DIR = STATE_DIR / "conf.d"
+# Copied out of the package so it keeps working after an AppImage exits
+SUPERVISOR = STATE_DIR / "supervisor.sh"
 CACHE_BIN = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "mavlink-router-app" / BINARY_NAME
+
+
+def _copy_if_changed(src: Path, dst: Path):
+    if dst.exists() and dst.read_bytes() == src.read_bytes():
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(".tmp")
+    shutil.copy2(src, tmp)
+    os.replace(tmp, dst)
 
 
 def find_binary() -> str:
@@ -35,11 +48,7 @@ def find_binary() -> str:
     if appdir:
         bundled = Path(appdir) / "usr" / "bin" / BINARY_NAME
         if bundled.exists():
-            if not CACHE_BIN.exists() or CACHE_BIN.stat().st_size != bundled.stat().st_size:
-                CACHE_BIN.parent.mkdir(parents=True, exist_ok=True)
-                tmp = CACHE_BIN.with_suffix(".tmp")
-                shutil.copy2(bundled, tmp)
-                os.replace(tmp, CACHE_BIN)
+            _copy_if_changed(bundled, CACHE_BIN)
             return str(CACHE_BIN)
 
     path = shutil.which(BINARY_NAME)
@@ -48,21 +57,43 @@ def find_binary() -> str:
     return path
 
 
-def _is_router(pid: int) -> bool:
+# --- /proc helpers -----------------------------------------------------------
+
+def _cmdline(pid: int) -> List[str]:
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
-            argv0 = f.read().split(b"\0")[0]
-        return os.path.basename(argv0).decode() == BINARY_NAME
+            return [a.decode(errors="replace") for a in f.read().split(b"\0") if a]
     except OSError:
-        return False
+        return []
 
 
-def all_router_pids() -> List[int]:
-    pids = []
-    for entry in os.listdir("/proc"):
-        if entry.isdigit() and _is_router(int(entry)):
-            pids.append(int(entry))
-    return pids
+def _ppid(pid: int) -> Optional[int]:
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return int(f.read().rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def process_name(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/comm") as f:
+            return f.read().strip()
+    except OSError:
+        return "?"
+
+
+def _pids() -> List[int]:
+    return [int(e) for e in os.listdir("/proc") if e.isdigit()]
+
+
+def _is_router(pid: int) -> bool:
+    argv = _cmdline(pid)
+    return bool(argv) and os.path.basename(argv[0]) == BINARY_NAME
+
+
+def _is_supervisor(pid: int) -> bool:
+    return str(SUPERVISOR) in _cmdline(pid)[:2]
 
 
 def open_files(pid: int) -> List[str]:
@@ -79,6 +110,12 @@ def open_files(pid: int) -> List[str]:
     return paths
 
 
+def device_holders(device: str) -> List[Tuple[int, str]]:
+    """(pid, name) of processes that have the device open (own processes only)."""
+    target = os.path.realpath(device)
+    return [(pid, process_name(pid)) for pid in _pids() if target in open_files(pid)]
+
+
 def uptime_s(pid: int) -> Optional[float]:
     try:
         with open(f"/proc/{pid}/stat") as f:
@@ -91,6 +128,20 @@ def uptime_s(pid: int) -> Optional[float]:
         return None
 
 
+def _trim_log(max_bytes: int = 2_000_000, keep_bytes: int = 500_000):
+    """Keep the log bounded; a router retrying a busy port logs every second."""
+    try:
+        if LOG_FILE.stat().st_size > max_bytes:
+            with open(LOG_FILE, "rb") as f:
+                f.seek(-keep_bytes, os.SEEK_END)
+                tail = f.read()
+            LOG_FILE.write_bytes(tail[tail.find(b"\n") + 1:])
+    except OSError:
+        pass
+
+
+# --- router control ----------------------------------------------------------
+
 class Router:
     def __init__(self):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -98,29 +149,35 @@ class Router:
         # Set only when started in this session, so the child gets reaped
         self._proc: Optional[subprocess.Popen] = None
 
-    def pid(self) -> Optional[int]:
-        """Pid of the router this app started, if it's still running."""
+    def supervisor_pid(self) -> Optional[int]:
+        """Pid of the supervisor this app started, if it's still running."""
         if self._proc is not None and self._proc.poll() is not None:
             self._proc = None
         try:
             pid = int(PID_FILE.read_text().strip())
         except (OSError, ValueError):
             return None
-        return pid if _is_router(pid) else None
+        return pid if _is_supervisor(pid) else None
 
-    def external_pids(self) -> List[int]:
-        """Routers running that this app didn't start (e.g. from a terminal)."""
-        ours = self.pid()
-        return [p for p in all_router_pids() if p != ours]
+    def router_pids(self) -> Dict[str, List[int]]:
+        """mavlink-routerd processes: "ours" (run by our supervisor) and "external"."""
+        sup = self.supervisor_pid()
+        result = {"ours": [], "external": []}
+        for pid in _pids():
+            if _is_router(pid):
+                result["ours" if sup is not None and _ppid(pid) == sup else "external"].append(pid)
+        return result
 
-    def start(self, conf_text: str) -> int:
+    def start(self, conf_text: str, device: str = "") -> int:
         binary = find_binary()
+        _copy_if_changed(Path(__file__).parent / "supervisor.sh", SUPERVISOR)
         CONF_FILE.write_text(conf_text)
+        _trim_log()
         with open(LOG_FILE, "a") as log:
-            log.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} starting {binary} -c {CONF_FILE}\n")
+            log.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} supervisor: {binary} -c {CONF_FILE}\n")
             log.flush()
             self._proc = subprocess.Popen(
-                [binary, "-c", str(CONF_FILE), "-d", str(CONF_DIR)],
+                ["/bin/sh", str(SUPERVISOR), binary, str(CONF_FILE), str(CONF_DIR), device],
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
@@ -130,35 +187,52 @@ class Router:
         PID_FILE.write_text(f"{self._proc.pid}\n")
         return self._proc.pid
 
-    def stop(self, pid: int, timeout: float = 3.0) -> bool:
-        """SIGTERM, then SIGKILL after the timeout. True once it's gone."""
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return True
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if self._reap(pid) or not _is_router(pid):
-                break
-            time.sleep(0.05)
-        else:
+    def stop(self, timeout: float = 3.0):
+        """Stop our supervisor and its router (they share a process group)."""
+        sup = self.supervisor_pid()
+        if sup is not None:
+            self._kill_group(sup, timeout)
+        PID_FILE.unlink(missing_ok=True)
+
+    def stop_external(self, pids: List[int], timeout: float = 3.0):
+        for pid in pids:
             try:
-                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
-            time.sleep(0.1)
-            self._reap(pid)
+        self._wait_gone(pids, timeout)
 
-        if self.pid() is None:
-            PID_FILE.unlink(missing_ok=True)
-        return not _is_router(pid)
+    def _kill_group(self, pgid: int, timeout: float):
+        members = [p for p in _pids() if self._pgid(p) == pgid]
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        self._wait_gone(members, timeout)
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        self._reap()
 
-    def _reap(self, pid: int) -> bool:
-        if self._proc is not None and self._proc.pid == pid:
-            if self._proc.poll() is not None:
-                self._proc = None
-                return True
-        return False
+    @staticmethod
+    def _pgid(pid: int) -> Optional[int]:
+        try:
+            return os.getpgid(pid)
+        except ProcessLookupError:
+            return None
+
+    def _wait_gone(self, pids: List[int], timeout: float):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self._reap()
+            if not any(os.path.exists(f"/proc/{p}") and (_is_router(p) or _is_supervisor(p)) for p in pids):
+                return
+            time.sleep(0.05)
+
+    def _reap(self):
+        if self._proc is not None and self._proc.poll() is not None:
+            self._proc = None
 
     def tail_log(self, max_lines: int = 200) -> str:
         try:

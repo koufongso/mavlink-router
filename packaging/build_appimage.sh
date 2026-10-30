@@ -24,6 +24,7 @@ pyinstaller --noconfirm --clean --windowed \
     --name mavlink-router-app \
     --distpath "$BUILD/dist" --workpath "$BUILD/work" --specpath "$BUILD" \
     --add-data "$ROOT/link_manager/icon.svg:link_manager" \
+    --add-data "$ROOT/link_manager/supervisor.sh:link_manager" \
     --paths "$ROOT" \
     packaging/entry.py
 

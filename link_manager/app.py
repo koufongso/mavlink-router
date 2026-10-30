@@ -14,19 +14,50 @@ from PyQt6.QtWidgets import (
 
 from . import profiles
 from .monitor import LinkMonitor
-from .router import Router, open_files, uptime_s
+from .router import Router, device_holders, open_files, uptime_s
 
 GREEN, ORANGE, RED, GRAY = "#2e9d4f", "#d98a1a", "#d0393b", "#8a8a8a"
 BAUD_RATES = ["57600", "115200", "230400", "460800", "921600"]
 HEARTBEAT_TIMEOUT_S = 3.0
+# Words in a /dev/serial/by-id name that mean it's an autopilot, not a radio
+AUTOPILOT_HINTS = ("px4", "pixhawk", "ardupilot", "cubepilot", "fmu")
 
 
 def serial_ports() -> list:
-    """Serial devices, stable /dev/serial/by-id names first."""
-    by_id = sorted(glob.glob("/dev/serial/by-id/*"))
-    raw = sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*"))
-    linked = {os.path.realpath(p) for p in by_id}
-    return by_id + [p for p in raw if p not in linked]
+    """(label, path) for serial devices; stable /dev/serial/by-id paths first.
+
+    by-id paths survive a replug (ttyACM0 may come back as ttyACM1), so they
+    are the ones to save and to wait for.
+    """
+    ports = []
+    linked = set()
+    for path in sorted(glob.glob("/dev/serial/by-id/*")):
+        real = os.path.realpath(path)
+        linked.add(real)
+        ports.append((f"{by_id_label(path)} ({os.path.basename(real)})", path))
+    for path in sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")):
+        if path not in linked:
+            ports.append((path, path))
+    return ports
+
+
+def by_id_label(path: str) -> str:
+    """'usb-Holybro_PX4_FMU_v6C.x_3A0029-if00' -> 'Holybro PX4 FMU v6C.x'."""
+    name = os.path.basename(path)
+    if name.startswith("usb-"):
+        name = name[4:]
+    name = name.rsplit("-if", 1)[0]
+    parts = name.split("_")
+    if len(parts) > 1 and len(parts[-1]) >= 6 and parts[-1].isalnum():
+        parts = parts[:-1]  # trailing serial number
+    return " ".join(parts)
+
+
+def looks_like_autopilot(device: str) -> bool:
+    real = os.path.realpath(device)
+    names = [os.path.basename(device)] + [
+        os.path.basename(p) for p in glob.glob("/dev/serial/by-id/*") if os.path.realpath(p) == real]
+    return any(hint in n.lower() for n in names for hint in AUTOPILOT_HINTS)
 
 
 def udp_listen_ports() -> set:
@@ -42,6 +73,10 @@ def udp_listen_ports() -> set:
         except (OSError, StopIteration, ValueError, IndexError):
             pass
     return ports
+
+
+def describe(holders) -> str:
+    return ", ".join(f"{name} (pid {pid})" for pid, name in holders)
 
 
 def format_duration(seconds: float) -> str:
@@ -107,7 +142,6 @@ class MainWindow(QMainWindow):
 
         self._device_label = QLabel("Port")
         self._device_combo = QComboBox()
-        self._device_combo.setEditable(True)
         self._device_combo.setMinimumWidth(320)
         self._rescan_btn = QToolButton()
         self._rescan_btn.setText("⟳")
@@ -203,11 +237,21 @@ class MainWindow(QMainWindow):
             self._udp_spin.setValue(int(self._settings["sitl"]["listen_port"]))
         self._rebuild_endpoint_rows()
 
+    def _device(self) -> str:
+        return self._device_combo.currentData() or ""
+
     def _rescan_ports(self, selected: str = ""):
-        current = selected or self._device_combo.currentText()
+        current = selected or self._device()
         self._device_combo.clear()
-        self._device_combo.addItems(serial_ports())
-        self._device_combo.setCurrentText(current)
+        for label, path in serial_ports():
+            self._device_combo.addItem(label, path)
+        if current and self._device_combo.findData(current) < 0:
+            # Keep the saved device selectable while unplugged; the router waits for it
+            label = current if os.path.exists(current) else f"{current} (not connected)"
+            self._device_combo.addItem(label, current)
+        index = self._device_combo.findData(current)
+        if index >= 0:
+            self._device_combo.setCurrentIndex(index)
 
     def _rebuild_endpoint_rows(self):
         while self._endpoint_grid.count():
@@ -225,20 +269,33 @@ class MainWindow(QMainWindow):
         mode = self._mode()
         device, baud = "", 0
         if mode in profiles.SERIAL_MODES:
-            device = self._device_combo.currentText().strip()
+            device = self._device()
+            if not device:
+                QMessageBox.warning(self, "No port", "Select the serial port first.")
+                return
             try:
                 baud = int(self._baud_combo.currentText())
             except ValueError:
                 QMessageBox.warning(self, "Invalid baud rate", "Baud rate must be a number.")
                 return
-            if not os.path.exists(device):
-                QMessageBox.warning(self, "Port not found", f"{device} doesn't exist. Is the radio plugged in?")
+            if mode == "flight" and looks_like_autopilot(device) and not self._confirm(
+                    "This looks like the Pixhawk's USB port",
+                    f"{device} looks like an autopilot, not a telemetry radio.\n\n"
+                    "In HITL the sim bridge owns the Pixhawk USB; Flight mode should use the ground radio.\n\n"
+                    "Start on this port anyway?"):
+                return
+            holders = device_holders(device)
+            if holders and not self._confirm(
+                    "Port in use",
+                    f"{device} is open by {describe(holders)}.\n\n"
+                    "The router can't open it until that program lets go (e.g. QGC AutoConnect). "
+                    "Start anyway? It will keep retrying.\n"):
                 return
             self._settings["serial"][mode] = {"device": device, "baud": baud}
         else:
             self._settings["sitl"]["listen_port"] = self._udp_spin.value()
 
-        others = self._router.external_pids()
+        others = self._router.router_pids()["external"]
         if others:
             QMessageBox.warning(
                 self, "Router already running",
@@ -250,27 +307,24 @@ class MainWindow(QMainWindow):
         profiles.save_settings(self._settings)
         conf = profiles.build_conf(self._settings, mode, device, baud)
         try:
-            self._router.start(conf)
+            self._router.start(conf, device)
         except (OSError, FileNotFoundError) as e:
             QMessageBox.critical(self, "Could not start router", str(e))
         self._refresh()
 
     def _on_stop(self):
-        pid = self._router.pid()
-        if pid is None:
-            others = self._router.external_pids()
-            if not others:
-                return
-            answer = QMessageBox.question(
-                self, "Stop external router?",
-                f"A router not started from this app is running (pid {', '.join(map(str, others))}). Stop it?")
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-            for p in others:
-                self._router.stop(p)
+        if self._router.supervisor_pid() is not None:
+            self._router.stop()
         else:
-            self._router.stop(pid)
+            others = self._router.router_pids()["external"]
+            if others and self._confirm(
+                    "Stop external router?",
+                    f"A router not started from this app is running (pid {', '.join(map(str, others))}). Stop it?"):
+                self._router.stop_external(others)
         self._refresh()
+
+    def _confirm(self, title: str, text: str) -> bool:
+        return QMessageBox.question(self, title, text) == QMessageBox.StandardButton.Yes
 
     def _open_config_dir(self):
         profiles.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -284,25 +338,28 @@ class MainWindow(QMainWindow):
     # --- status -------------------------------------------------------------
 
     def _refresh(self):
-        pid = self._router.pid()
-        others = self._router.external_pids()
-        running_pid = pid or (others[0] if others else None)
+        supervisor = self._router.supervisor_pid()
+        pids = self._router.router_pids()
+        router = pids["ours"][0] if pids["ours"] else None
+        active = supervisor is not None or bool(pids["external"])
 
-        if pid:
-            up = uptime_s(pid)
-            self._router_row.set(GREEN, f"running, pid {pid}" + (f", up {format_duration(up)}" if up else ""))
-        elif others:
-            self._router_row.set(ORANGE, f"running outside this app (pid {', '.join(map(str, others))})")
+        if router is not None:
+            up = uptime_s(router)
+            self._router_row.set(GREEN, f"running, pid {router}" + (f", up {format_duration(up)}" if up else ""))
+        elif supervisor is not None:
+            self._router_row.set(ORANGE, "waiting to (re)start, reconnects automatically")
+        elif pids["external"]:
+            self._router_row.set(ORANGE, f"running outside this app (pid {', '.join(map(str, pids['external']))})")
         else:
             self._router_row.set(GRAY, "stopped")
 
-        self._start_btn.setEnabled(running_pid is None)
-        self._stop_btn.setEnabled(running_pid is not None)
-        for w in (self._mode_combo, self._device_combo, self._baud_combo, self._udp_spin):
-            w.setEnabled(running_pid is None)
+        self._start_btn.setEnabled(not active)
+        self._stop_btn.setEnabled(active)
+        for w in (self._mode_combo, self._device_combo, self._rescan_btn, self._baud_combo, self._udp_spin):
+            w.setEnabled(not active)
 
-        self._refresh_input(pid)
-        self._refresh_link(running_pid is not None)
+        self._refresh_input(supervisor, router)
+        self._refresh_link(router is not None or bool(pids["external"]))
 
         listening = udp_listen_ports()
         for status, address, port in self._endpoint_rows:
@@ -320,18 +377,39 @@ class MainWindow(QMainWindow):
                 self._log_view.setPlainText(text)
                 self._log_view.verticalScrollBar().setValue(self._log_view.verticalScrollBar().maximum())
 
-    def _refresh_input(self, pid):
+    def _refresh_input(self, supervisor, router):
         mode = self._mode()
-        if pid is None:
-            self._input_row.set(GRAY, "-")
-        elif mode in profiles.SERIAL_MODES:
-            device = os.path.realpath(self._settings["serial"][mode]["device"])
-            if device in open_files(pid):
-                self._input_row.set(GREEN, f"{device} open")
+        if mode not in profiles.SERIAL_MODES:
+            if router is not None:
+                self._input_row.set(GREEN, f"listening on UDP {self._settings['sitl']['listen_port']}")
             else:
-                self._input_row.set(RED, f"{device} not open (see router log)")
+                self._input_row.set(GRAY, "-")
+            return
+
+        # While running, show the device the router was started with
+        device = self._settings["serial"][mode]["device"] if supervisor is not None else self._device()
+        if not device:
+            self._input_row.set(GRAY, "-")
+            return
+        name = os.path.basename(os.path.realpath(device))
+        if not os.path.exists(device):
+            if supervisor is not None:
+                self._input_row.set(ORANGE, "unplugged, waiting for it to come back")
+            else:
+                self._input_row.set(GRAY, "not connected")
+            return
+        if router is not None and os.path.realpath(device) in open_files(router):
+            self._input_row.set(GREEN, f"{name} open")
+            return
+
+        holders = [h for h in device_holders(device) if h[0] != router]
+        if holders:
+            color = RED if supervisor is not None else ORANGE
+            self._input_row.set(color, f"{name} held by {describe(holders)}")
+        elif supervisor is not None:
+            self._input_row.set(ORANGE, f"{name} connecting...")
         else:
-            self._input_row.set(GREEN, f"listening on UDP {self._settings['sitl']['listen_port']}")
+            self._input_row.set(GRAY, f"{name} available")
 
     def _refresh_link(self, router_running: bool):
         snap = self._monitor.snapshot()
