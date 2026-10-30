@@ -344,9 +344,7 @@ class MainWindow(QMainWindow):
         elif snap.heartbeat_age_s > HEARTBEAT_TIMEOUT_S:
             self._heartbeat_row.set(RED, f"lost, last seen {snap.heartbeat_age_s:.0f} s ago (sysid {snap.sysid})")
         else:
-            state = "armed" if snap.armed else "disarmed"
-            self._heartbeat_row.set(
-                GREEN, f"sysid {snap.sysid}, {snap.heartbeat_hz:.1f} Hz, {snap.mode}, {state}")
+            self._heartbeat_row.set(GREEN, f"sysid {snap.sysid}, {snap.heartbeat_hz:.1f} Hz")
 
         if router_running:
             self._traffic_row.set(GREEN if snap.msgs_per_s > 0 else GRAY, f"{snap.msgs_per_s:.0f} msg/s")

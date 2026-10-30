@@ -27,8 +27,8 @@ PX4 SITL ─────┤                                 ├─► UDP 14552 
 
 - **Router**: running/stopped, pid and uptime. Orange means a `mavlink-routerd` started outside this app is running.
 - **Vehicle port**: the serial device is actually open by the router (or the SITL UDP port).
-- **Vehicle heartbeat**: sysid, rate, flight mode and armed state of the vehicle (GCS heartbeats are ignored). Red when
-  no heartbeat for 3 s.
+- **Vehicle heartbeat**: the vehicle is actually heard through the router: its sysid and heartbeat rate (GCS heartbeats
+  are ignored). Red when no heartbeat for 3 s. Flight mode, arming etc. are left to QGC.
 - **Endpoints**: green when something on this machine is listening on that UDP port (e.g. QGC is open).
 
 ## Configuration
