@@ -131,6 +131,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("MAVLink Router")
         self._quitting = False
+        # Minimize only; quitting goes through Quit (it stops the router)
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.CustomizeWindowHint
+                            | Qt.WindowType.WindowTitleHint | Qt.WindowType.WindowMinimizeButtonHint)
         self._reported_errors = set()  # each problem pops up once per Start
         self._settings = profiles.load_settings()
         self._router = Router()
@@ -366,27 +369,24 @@ class MainWindow(QMainWindow):
                 self._router.stop_external(others)
         self._refresh()
 
-    def _on_quit(self):
-        supervisor = self._router.supervisor_pid()
-        if supervisor is not None:
-            box = QMessageBox(self)
-            box.setWindowTitle("Quit")
-            box.setText("The router is running.")
-            box.setInformativeText("Keep it running in the background (QGC stays connected), or stop it?")
-            keep = box.addButton("Keep router running", QMessageBox.ButtonRole.AcceptRole)
+    def _on_quit(self) -> bool:
+        """Quit after confirmation; a running router is stopped. True if quitting."""
+        if self._router.supervisor_pid() is not None:
+            box = QMessageBox(QMessageBox.Icon.Question, "Quit",
+                              "The router is running. Stop it and quit?", parent=self)
             stop = box.addButton("Stop router and quit", QMessageBox.ButtonRole.DestructiveRole)
             box.addButton(QMessageBox.StandardButton.Cancel)
-            box.setDefaultButton(keep)
+            box.setDefaultButton(QMessageBox.StandardButton.Cancel)
             box.exec()
-            if box.clickedButton() == stop:
-                self._router.stop()
-            elif box.clickedButton() != keep:
-                return
+            if box.clickedButton() != stop:
+                return False
+            self._router.stop()
         elif not self._confirm("Quit", "Quit MAVLink Router?"):
-            return
+            return False
         self._quitting = True
         self._monitor.stop()
         QApplication.quit()
+        return True
 
     def show_existing(self):
         """Bring the window back, e.g. when the app is launched a second time."""
@@ -520,9 +520,9 @@ class MainWindow(QMainWindow):
             self._traffic_row.set(GRAY, "-")
 
     def closeEvent(self, event):
-        if self._quitting:
+        # The close button is hidden, but window managers may still close the
+        # window (Alt+F4, or ignoring the hint): treat that as Quit
+        if self._quitting or self._on_quit():
             event.accept()
-            return
-        # Closing only minimizes, so the app stays in the taskbar/dock; Quit exits
-        event.ignore()
-        self.showMinimized()
+        else:
+            event.ignore()
