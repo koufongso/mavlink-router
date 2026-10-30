@@ -360,21 +360,24 @@ class MainWindow(QMainWindow):
     def _on_quit(self) -> bool:
         """Quit after confirmation; a running router is stopped. True if quitting."""
         if self._router.supervisor_pid() is not None:
-            box = QMessageBox(QMessageBox.Icon.Question, "Quit",
-                              "The router is running. Stop it and quit?", parent=self)
-            stop = box.addButton("Stop router and quit", QMessageBox.ButtonRole.DestructiveRole)
-            box.addButton(QMessageBox.StandardButton.Cancel)
-            box.setDefaultButton(QMessageBox.StandardButton.Cancel)
-            box.exec()
-            if box.clickedButton() != stop:
+            if not self._ask_quit("The router is running. Stop it and quit?", "Stop router and quit"):
                 return False
             self._router.stop()
-        elif not self._confirm("Quit", "Quit MAVLink Router?"):
+        elif not self._ask_quit("Quit MAVLink Router?", "Quit"):
             return False
         self._quitting = True
         self._monitor.stop()
         QApplication.quit()
         return True
+
+    def _ask_quit(self, text: str, action: str) -> bool:
+        """Cancel + one action button; same roles in both quit dialogs, so the same button order."""
+        box = QMessageBox(QMessageBox.Icon.Question, "Quit", text, parent=self)
+        go = box.addButton(action, QMessageBox.ButtonRole.AcceptRole)
+        cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() == go
 
     def show_existing(self):
         """Bring the window back, e.g. when the app is launched a second time."""
