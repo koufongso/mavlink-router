@@ -26,12 +26,29 @@ pyinstaller --noconfirm --clean --windowed \
     --add-data "$ROOT/link_manager/icon.svg:link_manager" \
     --add-data "$ROOT/link_manager/supervisor.sh:link_manager" \
     --paths "$ROOT" \
+    `# pymavlink imports these optionally; the app only needs mavutil` \
+    --exclude-module cv2 --exclude-module numpy --exclude-module matplotlib \
+    --exclude-module lxml --exclude-module PIL --exclude-module scipy \
+    --exclude-module pandas --exclude-module tkinter --exclude-module IPython \
     packaging/entry.py
 
 cp -r "$BUILD/dist/mavlink-router-app" "$APPDIR/usr/lib/"
 cp "$ROUTERD" "$APPDIR/usr/bin/mavlink-routerd"
 cp packaging/mavlink-router.desktop "$APPDIR/"
-cp link_manager/icon.svg "$APPDIR/mavlink-router.svg"
+# appimagetool needs a PNG icon (and .DirIcon); render the SVG with Qt
+QT_QPA_PLATFORM=offscreen python3 - "$ROOT/link_manager/icon.svg" "$APPDIR/mavlink-router.png" <<'PY'
+import sys
+from PyQt6.QtGui import QGuiApplication, QImage, QPainter
+from PyQt6.QtSvg import QSvgRenderer
+app = QGuiApplication(sys.argv[:1])
+image = QImage(256, 256, QImage.Format.Format_ARGB32)
+image.fill(0)
+painter = QPainter(image)
+QSvgRenderer(sys.argv[1]).render(painter)
+painter.end()
+image.save(sys.argv[2])
+PY
+ln -sf mavlink-router.png "$APPDIR/.DirIcon"
 
 cat > "$APPDIR/AppRun" <<'APPRUN'
 #!/bin/sh

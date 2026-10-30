@@ -4,5 +4,5 @@ Name=MAVLink Router
 Comment=Start and monitor mavlink-routerd
 Exec=mavlink-router-app
 Icon=mavlink-router
-Categories=Utility;Network;
+Categories=Utility;
 Terminal=false
