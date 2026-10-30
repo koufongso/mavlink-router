@@ -5,9 +5,9 @@ import os
 import subprocess
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFontDatabase
+from PyQt6.QtGui import QFontDatabase, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow,
+    QApplication, QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QToolButton,
     QVBoxLayout, QWidget,
 )
@@ -104,6 +104,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MAVLink Router")
+        self._quitting = False
         self.setMinimumWidth(520)
         self._settings = profiles.load_settings()
         self._router = Router()
@@ -118,7 +119,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_endpoint_box())
         layout.addLayout(self._build_log())
         self.setCentralWidget(central)
-        self.statusBar().showMessage("Closing this window leaves the router running.")
+        self.statusBar().showMessage("Closing the window minimizes it; Quit exits.")
 
         self._load_mode(self._settings["mode"])
         self._timer = QTimer(self)
@@ -175,6 +176,11 @@ class MainWindow(QMainWindow):
         row.addWidget(self._stop_btn)
         row.addStretch()
         row.addWidget(config_btn)
+        quit_btn = QPushButton("Quit")
+        quit_btn.setToolTip("Exit the app (Ctrl+Q); you choose whether the router keeps running")
+        quit_btn.clicked.connect(self._on_quit)
+        QShortcut(QKeySequence.StandardKey.Quit, self, activated=self._on_quit)
+        row.addWidget(quit_btn)
         return row
 
     def _build_status_box(self) -> QGroupBox:
@@ -323,6 +329,32 @@ class MainWindow(QMainWindow):
                 self._router.stop_external(others)
         self._refresh()
 
+    def _on_quit(self):
+        supervisor = self._router.supervisor_pid()
+        if supervisor is not None:
+            box = QMessageBox(self)
+            box.setWindowTitle("Quit")
+            box.setText("The router is running.")
+            box.setInformativeText("Keep it running in the background (QGC stays connected), or stop it?")
+            keep = box.addButton("Keep router running", QMessageBox.ButtonRole.AcceptRole)
+            stop = box.addButton("Stop router and quit", QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(keep)
+            box.exec()
+            if box.clickedButton() == stop:
+                self._router.stop()
+            elif box.clickedButton() != keep:
+                return
+        self._quitting = True
+        self._monitor.stop()
+        QApplication.quit()
+
+    def show_existing(self):
+        """Bring the window back, e.g. when the app is launched a second time."""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
     def _confirm(self, title: str, text: str) -> bool:
         return QMessageBox.question(self, title, text) == QMessageBox.StandardButton.Yes
 
@@ -352,6 +384,14 @@ class MainWindow(QMainWindow):
             self._router_row.set(ORANGE, f"running outside this app (pid {', '.join(map(str, pids['external']))})")
         else:
             self._router_row.set(GRAY, "stopped")
+
+        if router is not None or pids["external"]:
+            state = "running"
+        elif supervisor is not None:
+            state = "waiting for device"
+        else:
+            state = "stopped"
+        self.setWindowTitle(f"MAVLink Router: {state}")
 
         self._start_btn.setEnabled(not active)
         self._stop_btn.setEnabled(active)
@@ -430,5 +470,9 @@ class MainWindow(QMainWindow):
             self._traffic_row.set(GRAY, "-")
 
     def closeEvent(self, event):
-        self._monitor.stop()
-        event.accept()
+        if self._quitting:
+            event.accept()
+            return
+        # Closing only minimizes, so the app stays in the taskbar/dock; Quit exits
+        event.ignore()
+        self.showMinimized()
