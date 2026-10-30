@@ -19,6 +19,7 @@ from .router import Router, device_holders, open_files, uptime_s
 GREEN, ORANGE, RED, GRAY = "#2e9d4f", "#d98a1a", "#d0393b", "#8a8a8a"
 BAUD_RATES = ["57600", "115200", "230400", "460800", "921600"]
 HEARTBEAT_TIMEOUT_S = 3.0
+MIN_WIDTH = 640
 # Words in a /dev/serial/by-id name that mean it's an autopilot, not a radio
 AUTOPILOT_HINTS = ("px4", "pixhawk", "ardupilot", "cubepilot", "fmu")
 
@@ -91,12 +92,14 @@ class StatusRow:
         self.dot = QLabel("●")
         self.detail = QLabel()
         self.detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.detail.setWordWrap(True)  # the window width is fixed
         grid.addWidget(self.dot, row, 0)
         grid.addWidget(QLabel(label), row, 1)
         grid.addWidget(self.detail, row, 2)
 
-    def set(self, color: str, text: str):
+    def set(self, color: str, text: str, tooltip: str = ""):
         self.dot.setStyleSheet(f"color: {color}; font-size: 16px;")
+        self.dot.setToolTip(tooltip)
         self.detail.setText(text)
 
 
@@ -105,22 +108,33 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("MAVLink Router")
         self._quitting = False
-        self.setMinimumWidth(520)
         self._settings = profiles.load_settings()
         self._router = Router()
         self._monitor = LinkMonitor(profiles.MONITOR_PORT)
         self._monitor.start()
 
+        # Left to right like the data: vehicle link -> router -> endpoints
+        columns = QHBoxLayout()
+        self._input_box = self._build_input_box()
+        columns.addWidget(self._input_box, 1)
+        arrow = QLabel("➜")
+        arrow.setStyleSheet(f"color: {GRAY}; font-size: 20px;")
+        columns.addWidget(arrow)
+        columns.addWidget(self._build_endpoint_box(), 1)
+
         central = QWidget()
         layout = QVBoxLayout(central)
-        layout.addWidget(self._build_input_box())
-        layout.addLayout(self._build_buttons())
-        layout.addWidget(self._build_status_box())
-        layout.addWidget(self._build_endpoint_box())
-        layout.addLayout(self._build_log())
+        layout.addLayout(columns)
+        layout.addLayout(self._build_router_row())
+        layout.addWidget(self._build_log(), 1)  # extra height goes to the log
+        layout.addLayout(self._build_quit_row())
         self.setCentralWidget(central)
-        self.statusBar().showMessage("Closing the window minimizes it; Quit exits.")
 
+        # Fixed width, measured while the (widest) serial-port rows are still
+        # visible, i.e. before _load_mode hides them for SITL
+        self._rebuild_endpoint_rows()
+        self._input_box.setMinimumWidth(self._input_box.sizeHint().width())  # columns don't shift between modes
+        self.setFixedWidth(max(self.sizeHint().width(), MIN_WIDTH))
         self._load_mode(self._settings["mode"])
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
@@ -131,7 +145,9 @@ class MainWindow(QMainWindow):
 
     def _build_input_box(self) -> QGroupBox:
         box = QGroupBox("Vehicle link")
-        grid = QGridLayout(box)
+        col = QVBoxLayout(box)
+        grid = QGridLayout()
+        col.addLayout(grid)
 
         self._mode_combo = QComboBox()
         for key, label in profiles.MODES.items():
@@ -139,83 +155,92 @@ class MainWindow(QMainWindow):
         self._mode_combo.currentIndexChanged.connect(
             lambda: self._load_mode(self._mode_combo.currentData()))
         grid.addWidget(QLabel("Mode"), 0, 0)
-        grid.addWidget(self._mode_combo, 0, 1, 1, 3)
+        grid.addWidget(self._mode_combo, 0, 1, 1, 2)
 
         self._device_label = QLabel("Port")
         self._device_combo = QComboBox()
-        self._device_combo.setMinimumWidth(320)
+        # Long by-id names shouldn't dictate the column width
+        self._device_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._device_combo.setMinimumContentsLength(20)
         self._rescan_btn = QToolButton()
         self._rescan_btn.setText("⟳")
         self._rescan_btn.setToolTip("Rescan serial ports")
         self._rescan_btn.clicked.connect(self._rescan_ports)
-        self._baud_combo = QComboBox()
-        self._baud_combo.setEditable(True)
-        self._baud_combo.addItems(BAUD_RATES)
         grid.addWidget(self._device_label, 1, 0)
         grid.addWidget(self._device_combo, 1, 1)
         grid.addWidget(self._rescan_btn, 1, 2)
-        grid.addWidget(self._baud_combo, 1, 3)
 
-        self._udp_label = QLabel("PX4 UDP port")
+        self._baud_label = QLabel("Baud")
+        self._baud_combo = QComboBox()
+        self._baud_combo.setEditable(True)
+        self._baud_combo.addItems(BAUD_RATES)
+        grid.addWidget(self._baud_label, 2, 0)
+        grid.addWidget(self._baud_combo, 2, 1, 1, 2)
+
+        self._udp_label = QLabel("UDP port")
         self._udp_spin = QSpinBox()
         self._udp_spin.setRange(1, 65535)
-        grid.addWidget(self._udp_label, 2, 0)
-        grid.addWidget(self._udp_spin, 2, 1)
+        self._udp_spin.setToolTip("Port PX4 SITL sends its GCS link to")
+        grid.addWidget(self._udp_label, 3, 0)
+        grid.addWidget(self._udp_spin, 3, 1, 1, 2)
+        grid.setColumnStretch(1, 1)
+
+        status = QGridLayout()
+        status.setColumnStretch(2, 1)
+        self._input_row = StatusRow(status, 0, "Port")
+        self._heartbeat_row = StatusRow(status, 1, "Heartbeat")
+        self._traffic_row = StatusRow(status, 2, "Traffic")
+        col.addSpacing(6)
+        col.addLayout(status)
+        col.addStretch()
         return box
 
-    def _build_buttons(self) -> QHBoxLayout:
-        row = QHBoxLayout()
+    def _build_endpoint_box(self) -> QGroupBox:
+        box = QGroupBox("Endpoints")
+        col = QVBoxLayout(box)
+        self._endpoint_grid = QGridLayout()
+        self._endpoint_grid.setColumnStretch(2, 1)
+        self._endpoint_rows = []
+        col.addLayout(self._endpoint_grid)
+        col.addStretch()
+        config_btn = QPushButton("Open config folder")
+        config_btn.setToolTip(f"Endpoints and defaults: {profiles.SETTINGS_FILE}")
+        config_btn.clicked.connect(self._open_config_dir)
+        col.addWidget(config_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        return box
+
+    def _build_router_row(self) -> QGridLayout:
+        grid = QGridLayout()
+        grid.setColumnStretch(2, 1)
+        self._router_row = StatusRow(grid, 0, "Router")
         self._start_btn = QPushButton("Start")
         self._start_btn.clicked.connect(self._on_start)
         self._stop_btn = QPushButton("Stop")
         self._stop_btn.clicked.connect(self._on_stop)
-        config_btn = QPushButton("Open config folder")
-        config_btn.setToolTip(f"Endpoints and defaults: {profiles.SETTINGS_FILE}")
-        config_btn.clicked.connect(self._open_config_dir)
-        row.addWidget(self._start_btn)
-        row.addWidget(self._stop_btn)
-        row.addStretch()
-        row.addWidget(config_btn)
+        grid.addWidget(self._start_btn, 0, 3)
+        grid.addWidget(self._stop_btn, 0, 4)
+        return grid
+
+    def _build_quit_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
         quit_btn = QPushButton("Quit")
-        quit_btn.setToolTip("Exit the app (Ctrl+Q); you choose whether the router keeps running")
+        quit_btn.setToolTip("Exit the app (Ctrl+Q)")
         quit_btn.clicked.connect(self._on_quit)
         QShortcut(QKeySequence.StandardKey.Quit, self, activated=self._on_quit)
+        row.addStretch()
         row.addWidget(quit_btn)
         return row
 
-    def _build_status_box(self) -> QGroupBox:
-        box = QGroupBox("Status")
-        grid = QGridLayout(box)
-        grid.setColumnStretch(2, 1)
-        self._router_row = StatusRow(grid, 0, "Router")
-        self._input_row = StatusRow(grid, 1, "Vehicle port")
-        self._heartbeat_row = StatusRow(grid, 2, "Vehicle heartbeat")
-        self._traffic_row = StatusRow(grid, 3, "Traffic")
-        return box
-
-    def _build_endpoint_box(self) -> QGroupBox:
-        box = QGroupBox("Endpoints (green: something is listening on the port)")
-        self._endpoint_grid = QGridLayout(box)
-        self._endpoint_grid.setColumnStretch(2, 1)
-        self._endpoint_rows = []
-        return box
-
-    def _build_log(self) -> QVBoxLayout:
-        col = QVBoxLayout()
-        self._log_btn = QToolButton()
-        self._log_btn.setText("▸ Router log")
-        self._log_btn.setCheckable(True)
-        self._log_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self._log_btn.toggled.connect(self._on_log_toggled)
+    def _build_log(self) -> QGroupBox:
+        box = QGroupBox("Router log")
+        col = QVBoxLayout(box)
         self._log_view = QPlainTextEdit()
         self._log_view.setReadOnly(True)
         self._log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self._log_view.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
-        self._log_view.setMinimumHeight(160)
-        self._log_view.hide()
-        col.addWidget(self._log_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        self._log_view.setMinimumHeight(140)
         col.addWidget(self._log_view)
-        return col
+        return box
 
     # --- mode / inputs ------------------------------------------------------
 
@@ -230,7 +255,7 @@ class MainWindow(QMainWindow):
             self._mode_combo.blockSignals(False)
 
         serial = mode in profiles.SERIAL_MODES
-        for w in (self._device_label, self._device_combo, self._rescan_btn, self._baud_combo):
+        for w in (self._device_label, self._device_combo, self._rescan_btn, self._baud_label, self._baud_combo):
             w.setVisible(serial)
         self._udp_label.setVisible(not serial)
         self._udp_spin.setVisible(not serial)
@@ -345,6 +370,8 @@ class MainWindow(QMainWindow):
                 self._router.stop()
             elif box.clickedButton() != keep:
                 return
+        elif not self._confirm("Quit", "Quit MAVLink Router?"):
+            return
         self._quitting = True
         self._monitor.stop()
         QApplication.quit()
@@ -362,11 +389,6 @@ class MainWindow(QMainWindow):
         profiles.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         subprocess.Popen(["xdg-open", str(profiles.CONFIG_DIR)])
 
-    def _on_log_toggled(self, shown: bool):
-        self._log_btn.setText(("▾" if shown else "▸") + " Router log")
-        self._log_view.setVisible(shown)
-        self._refresh()
-
     # --- status -------------------------------------------------------------
 
     def _refresh(self):
@@ -379,9 +401,10 @@ class MainWindow(QMainWindow):
             up = uptime_s(router)
             self._router_row.set(GREEN, f"running, pid {router}" + (f", up {format_duration(up)}" if up else ""))
         elif supervisor is not None:
-            self._router_row.set(ORANGE, "waiting to (re)start, reconnects automatically")
+            self._router_row.set(ORANGE, "waiting for device", "Restarts automatically when the port is back")
         elif pids["external"]:
-            self._router_row.set(ORANGE, f"running outside this app (pid {', '.join(map(str, pids['external']))})")
+            self._router_row.set(ORANGE, "running (external)",
+                                 f"Started outside this app, pid {', '.join(map(str, pids['external']))}")
         else:
             self._router_row.set(GRAY, "stopped")
 
@@ -405,23 +428,28 @@ class MainWindow(QMainWindow):
         for status, address, port in self._endpoint_rows:
             text = f"{address}:{port}"
             if address not in ("127.0.0.1", "localhost"):
-                status.set(GRAY, text + " (remote)")
+                status.set(GRAY, text, "Remote address, can't check from here")
             elif port in listening:
-                status.set(GREEN, text)
+                status.set(GREEN, text, "Listening")
             else:
-                status.set(GRAY, text + " (nothing listening)")
+                status.set(GRAY, text, "Nothing listening")
 
         if self._log_view.isVisible():
             text = self._router.tail_log()
             if text != self._log_view.toPlainText():
+                # Follow new lines only if already at the bottom, so reading
+                # older lines isn't interrupted
+                bar = self._log_view.verticalScrollBar()
+                at_bottom = bar.value() >= bar.maximum() - 2
+                position = bar.value()
                 self._log_view.setPlainText(text)
-                self._log_view.verticalScrollBar().setValue(self._log_view.verticalScrollBar().maximum())
+                bar.setValue(bar.maximum() if at_bottom else position)
 
     def _refresh_input(self, supervisor, router):
         mode = self._mode()
         if mode not in profiles.SERIAL_MODES:
             if router is not None:
-                self._input_row.set(GREEN, f"listening on UDP {self._settings['sitl']['listen_port']}")
+                self._input_row.set(GREEN, f"UDP {self._settings['sitl']['listen_port']}")
             else:
                 self._input_row.set(GRAY, "-")
             return
@@ -434,7 +462,7 @@ class MainWindow(QMainWindow):
         name = os.path.basename(os.path.realpath(device))
         if not os.path.exists(device):
             if supervisor is not None:
-                self._input_row.set(ORANGE, "unplugged, waiting for it to come back")
+                self._input_row.set(ORANGE, "unplugged", "Reconnects automatically when plugged back in")
             else:
                 self._input_row.set(GRAY, "not connected")
             return
@@ -445,7 +473,8 @@ class MainWindow(QMainWindow):
         holders = [h for h in device_holders(device) if h[0] != router]
         if holders:
             color = RED if supervisor is not None else ORANGE
-            self._input_row.set(color, f"{name} held by {describe(holders)}")
+            self._input_row.set(color, f"held by {holders[0][1]}",
+                                f"{name} is open by {describe(holders)}, e.g. QGC AutoConnect")
         elif supervisor is not None:
             self._input_row.set(ORANGE, f"{name} connecting...")
         else:
@@ -460,7 +489,7 @@ class MainWindow(QMainWindow):
         elif snap.heartbeat_age_s is None:
             self._heartbeat_row.set(ORANGE, "waiting for vehicle")
         elif snap.heartbeat_age_s > HEARTBEAT_TIMEOUT_S:
-            self._heartbeat_row.set(RED, f"lost, last seen {snap.heartbeat_age_s:.0f} s ago (sysid {snap.sysid})")
+            self._heartbeat_row.set(RED, f"lost ({snap.heartbeat_age_s:.0f} s)", f"sysid {snap.sysid}")
         else:
             self._heartbeat_row.set(GREEN, f"sysid {snap.sysid}, {snap.heartbeat_hz:.1f} Hz")
 
