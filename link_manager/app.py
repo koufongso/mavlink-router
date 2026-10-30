@@ -19,7 +19,7 @@ from .router import Router, device_holders, open_files, uptime_s
 GREEN, ORANGE, RED, GRAY = "#2e9d4f", "#d98a1a", "#d0393b", "#8a8a8a"
 BAUD_RATES = ["57600", "115200", "230400", "460800", "921600"]
 HEARTBEAT_TIMEOUT_S = 3.0
-WINDOW_WIDTH = 760
+WINDOW_WIDTH = 658
 # Words in a /dev/serial/by-id name that mean it's an autopilot, not a radio
 AUTOPILOT_HINTS = ("px4", "pixhawk", "ardupilot", "cubepilot", "fmu")
 
