@@ -5,10 +5,10 @@ import os
 import subprocess
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFontDatabase, QKeySequence, QShortcut
+from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow,
-    QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QToolButton,
+    QMessageBox, QPushButton, QSpinBox, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -19,7 +19,7 @@ from .router import Router, device_holders, open_files, uptime_s
 GREEN, ORANGE, RED, GRAY = "#2e9d4f", "#d98a1a", "#d0393b", "#8a8a8a"
 BAUD_RATES = ["57600", "115200", "230400", "460800", "921600"]
 HEARTBEAT_TIMEOUT_S = 3.0
-MIN_WIDTH = 640
+WINDOW_WIDTH = 760
 # Words in a /dev/serial/by-id name that mean it's an autopilot, not a radio
 AUTOPILOT_HINTS = ("px4", "pixhawk", "ardupilot", "cubepilot", "fmu")
 
@@ -76,6 +76,29 @@ def udp_listen_ports() -> set:
     return ports
 
 
+def explain_router_error(line: str, device: str):
+    """(message, specific) for router errors that need the user to act, else None.
+
+    specific=False is the raw line as a fallback. Unplugging is expected (the
+    router restarts on its own), so it isn't reported.
+    """
+    if "Could not open" in line and "Permission denied" in line:
+        return ("No permission to open the serial port.\n\n"
+                "Add yourself to the dialout group, then log out and back in:\n"
+                "sudo usermod -aG dialout $USER", True)
+    if "Could not open" in line and "busy" in line.lower():
+        return (f"{device or 'The serial port'} is in use by another program "
+                "(often QGC AutoConnect). Close it or turn off AutoConnect for serial devices in QGC.", True)
+    if "Error binding" in line and "in use" in line.lower():
+        port = line.split(":")[-1].split()[0] if ":" in line else "?"
+        return (f"UDP port {port} is already used by another program.\n\n"
+                f"In SITL mode the router needs this port for PX4; make sure QGC isn't listening on it "
+                "(QGC uses 14570 in SITL mode).", True)
+    if "Could not" in line or "Error" in line or "Invalid" in line:
+        return line.strip(), False
+    return None
+
+
 def describe(holders) -> str:
     return ", ".join(f"{name} (pid {pid})" for pid, name in holders)
 
@@ -108,6 +131,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("MAVLink Router")
         self._quitting = False
+        self._reported_errors = set()  # each problem pops up once per Start
         self._settings = profiles.load_settings()
         self._router = Router()
         self._monitor = LinkMonitor(profiles.MONITOR_PORT)
@@ -116,17 +140,13 @@ class MainWindow(QMainWindow):
         # Left to right like the data: vehicle link -> router -> endpoints
         columns = QHBoxLayout()
         self._input_box = self._build_input_box()
-        columns.addWidget(self._input_box, 1)
-        arrow = QLabel("➜")
-        arrow.setStyleSheet(f"color: {GRAY}; font-size: 20px;")
-        columns.addWidget(arrow)
-        columns.addWidget(self._build_endpoint_box(), 1)
+        columns.addWidget(self._input_box)
+        columns.addWidget(self._build_endpoint_box(), 1)  # endpoints get the remaining width
 
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.addLayout(columns)
         layout.addLayout(self._build_router_row())
-        layout.addWidget(self._build_log(), 1)  # extra height goes to the log
         layout.addLayout(self._build_quit_row())
         self.setCentralWidget(central)
 
@@ -134,7 +154,8 @@ class MainWindow(QMainWindow):
         # visible, i.e. before _load_mode hides them for SITL
         self._rebuild_endpoint_rows()
         self._input_box.setMinimumWidth(self._input_box.sizeHint().width())  # columns don't shift between modes
-        self.setFixedWidth(max(self.sizeHint().width(), MIN_WIDTH))
+        self.setFixedWidth(max(self.sizeHint().width(), WINDOW_WIDTH))
+        self.setFixedHeight(self.sizeHint().height())
         self._load_mode(self._settings["mode"])
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
@@ -203,10 +224,6 @@ class MainWindow(QMainWindow):
         self._endpoint_rows = []
         col.addLayout(self._endpoint_grid)
         col.addStretch()
-        config_btn = QPushButton("Open config folder")
-        config_btn.setToolTip(f"Endpoints and defaults: {profiles.SETTINGS_FILE}")
-        config_btn.clicked.connect(self._open_config_dir)
-        col.addWidget(config_btn, alignment=Qt.AlignmentFlag.AlignRight)
         return box
 
     def _build_router_row(self) -> QGridLayout:
@@ -219,6 +236,10 @@ class MainWindow(QMainWindow):
         self._stop_btn.clicked.connect(self._on_stop)
         grid.addWidget(self._start_btn, 0, 3)
         grid.addWidget(self._stop_btn, 0, 4)
+        config_btn = QPushButton("Open config folder")
+        config_btn.setToolTip(f"Endpoints and defaults: {profiles.SETTINGS_FILE}")
+        config_btn.clicked.connect(self._open_config_dir)
+        grid.addWidget(config_btn, 0, 5)
         return grid
 
     def _build_quit_row(self) -> QHBoxLayout:
@@ -231,16 +252,6 @@ class MainWindow(QMainWindow):
         row.addWidget(quit_btn)
         return row
 
-    def _build_log(self) -> QGroupBox:
-        box = QGroupBox("Router log")
-        col = QVBoxLayout(box)
-        self._log_view = QPlainTextEdit()
-        self._log_view.setReadOnly(True)
-        self._log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self._log_view.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
-        self._log_view.setMinimumHeight(140)
-        col.addWidget(self._log_view)
-        return box
 
     # --- mode / inputs ------------------------------------------------------
 
@@ -337,6 +348,7 @@ class MainWindow(QMainWindow):
         self._settings["mode"] = mode
         profiles.save_settings(self._settings)
         conf = profiles.build_conf(self._settings, mode, device, baud)
+        self._reported_errors.clear()
         try:
             self._router.start(conf, device)
         except (OSError, FileNotFoundError) as e:
@@ -382,6 +394,20 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def _report_router_errors(self):
+        device = self._settings["serial"].get(self._mode(), {}).get("device", "")
+        found = [e for e in (explain_router_error(line, device) for line in self._router.new_output()) if e]
+        # One failure often prints several lines; prefer the explained one
+        if any(specific for _, specific in found):
+            found = [e for e in found if e[1]]
+        for message, _ in found:
+            if message not in self._reported_errors:
+                self._reported_errors.add(message)
+                # Non-modal, so status keeps updating behind it
+                box = QMessageBox(QMessageBox.Icon.Warning, "MAVLink Router", message, parent=self)
+                box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+                box.show()
+
     def _confirm(self, title: str, text: str) -> bool:
         return QMessageBox.question(self, title, text) == QMessageBox.StandardButton.Yes
 
@@ -401,7 +427,11 @@ class MainWindow(QMainWindow):
             up = uptime_s(router)
             self._router_row.set(GREEN, f"running, pid {router}" + (f", up {format_duration(up)}" if up else ""))
         elif supervisor is not None:
-            self._router_row.set(ORANGE, "waiting for device", "Restarts automatically when the port is back")
+            device = self._settings["serial"].get(self._mode(), {}).get("device", "")
+            if device and not os.path.exists(device):
+                self._router_row.set(ORANGE, "waiting for device", "Starts automatically when the port is back")
+            else:
+                self._router_row.set(ORANGE, "retrying", "The router exited; it restarts every second")
         elif pids["external"]:
             self._router_row.set(ORANGE, "running (external)",
                                  f"Started outside this app, pid {', '.join(map(str, pids['external']))}")
@@ -411,7 +441,7 @@ class MainWindow(QMainWindow):
         if router is not None or pids["external"]:
             state = "running"
         elif supervisor is not None:
-            state = "waiting for device"
+            state = "waiting"
         else:
             state = "stopped"
         self.setWindowTitle(f"MAVLink Router: {state}")
@@ -434,16 +464,7 @@ class MainWindow(QMainWindow):
             else:
                 status.set(GRAY, text, "Nothing listening")
 
-        if self._log_view.isVisible():
-            text = self._router.tail_log()
-            if text != self._log_view.toPlainText():
-                # Follow new lines only if already at the bottom, so reading
-                # older lines isn't interrupted
-                bar = self._log_view.verticalScrollBar()
-                at_bottom = bar.value() >= bar.maximum() - 2
-                position = bar.value()
-                self._log_view.setPlainText(text)
-                bar.setValue(bar.maximum() if at_bottom else position)
+        self._report_router_errors()
 
     def _refresh_input(self, supervisor, router):
         mode = self._mode()

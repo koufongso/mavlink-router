@@ -148,6 +148,9 @@ class Router:
         CONF_DIR.mkdir(parents=True, exist_ok=True)
         # Set only when started in this session, so the child gets reaped
         self._proc: Optional[subprocess.Popen] = None
+        # Router output is only read to explain failures; start at the end so
+        # errors from earlier runs aren't reported again
+        self._log_offset = LOG_FILE.stat().st_size if LOG_FILE.exists() else 0
 
     def supervisor_pid(self) -> Optional[int]:
         """Pid of the supervisor this app started, if it's still running."""
@@ -173,6 +176,7 @@ class Router:
         _copy_if_changed(Path(__file__).parent / "supervisor.sh", SUPERVISOR)
         CONF_FILE.write_text(conf_text)
         _trim_log()
+        self._log_offset = LOG_FILE.stat().st_size if LOG_FILE.exists() else 0
         with open(LOG_FILE, "a") as log:
             log.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} supervisor: {binary} -c {CONF_FILE}\n")
             log.flush()
@@ -234,12 +238,18 @@ class Router:
         if self._proc is not None and self._proc.poll() is not None:
             self._proc = None
 
-    def tail_log(self, max_lines: int = 200) -> str:
+    def new_output(self) -> List[str]:
+        """Router/supervisor output lines written since the last call."""
         try:
             with open(LOG_FILE, "rb") as f:
                 f.seek(0, os.SEEK_END)
-                f.seek(max(0, f.tell() - 32768))
-                lines = f.read().decode(errors="replace").splitlines()
-            return "\n".join(lines[-max_lines:])
+                if f.tell() < self._log_offset:  # trimmed
+                    self._log_offset = 0
+                f.seek(self._log_offset)
+                data = f.read()
         except OSError:
-            return ""
+            return []
+        # Only consume complete lines
+        end = data.rfind(b"\n") + 1
+        self._log_offset += end
+        return data[:end].decode(errors="replace").splitlines()

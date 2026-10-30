@@ -63,13 +63,16 @@ Pixhawk TELEM1 ~ SiK ~ ground SiK (/dev/ttyUSB0) ──► this app, Flight mode
   are ignored). Red when no heartbeat for 3 s. Flight mode, arming etc. are left to QGC.
 - **Endpoints**: green when something on this machine is listening on that UDP port (e.g. QGC is open).
 
+Problems you need to fix yourself (no permission for the serial port, port busy, UDP port already taken) pop up once
+as a message with what to do. Unplugging doesn't: the router just waits and reconnects.
+
 ## Configuration
 
 Settings live in `~/.config/mavlink-router-app/settings.json` (**Open config folder** in the app); it's written with the
 defaults on first run. Edit `endpoints` to add/remove tools; each entry takes `name`, `port`, optional `address`
 (default `127.0.0.1`) and optional `sitl_port` (used instead of `port` in SITL mode).
 
-Runtime files (generated `active.conf`, `router.log`, `supervisor.sh`, pid file) are in
+Runtime files (generated `active.conf`, the router output `router.log`, `supervisor.sh`, pid file) are in
 `~/.local/state/mavlink-router-app/`.
 
 ## Run from source
