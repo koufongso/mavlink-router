@@ -3,6 +3,8 @@
 import glob
 import os
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QKeySequence, QShortcut
@@ -19,6 +21,7 @@ from .router import Router, device_holders, open_files, uptime_s
 GREEN, ORANGE, RED, GRAY = "#2e9d4f", "#d98a1a", "#d0393b", "#8a8a8a"
 BAUD_RATES = ["57600", "115200", "230400", "460800", "921600"]
 HEARTBEAT_TIMEOUT_S = 3.0
+HOLDERS_CACHE_S = 2.0
 WINDOW_WIDTH = 658
 # Words in a /dev/serial/by-id name that mean it's an autopilot, not a radio
 AUTOPILOT_HINTS = ("px4", "pixhawk", "ardupilot", "cubepilot", "fmu")
@@ -113,6 +116,7 @@ class StatusRow:
 
     def __init__(self, grid: QGridLayout, row: int, label: str):
         self.dot = QLabel("●")
+        self._state = None
         self.detail = QLabel()
         self.detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.detail.setWordWrap(True)  # the window width is fixed
@@ -121,6 +125,12 @@ class StatusRow:
         grid.addWidget(self.detail, row, 2)
 
     def set(self, color: str, text: str, tooltip: str = ""):
+        # Called every refresh; only touch the widgets when something changed
+        # (setStyleSheet re-styles and repaints)
+        state = (color, text, tooltip)
+        if state == self._state:
+            return
+        self._state = state
         self.dot.setStyleSheet(f"color: {color}; font-size: 16px;")
         self.dot.setToolTip(tooltip)
         self.detail.setText(text)
@@ -132,6 +142,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("MAVLink Router")
         self._quitting = False
         self._reported_errors = set()  # each problem pops up once per Start
+        self._holders_cache = ("", float("-inf"), [])
+        self._holders_scan = None  # Future of a background device_holders() scan
+        self._scanner = ThreadPoolExecutor(max_workers=1)
         self._settings = profiles.load_settings()
         self._router = Router()
         self._monitor = LinkMonitor(profiles.MONITOR_PORT)
@@ -328,7 +341,7 @@ class MainWindow(QMainWindow):
         else:
             self._settings["sitl"]["listen_port"] = self._udp_spin.value()
 
-        others = self._router.router_pids()["external"]
+        others = self._router.router_pids(fresh=True)["external"]
         if others:
             QMessageBox.warning(
                 self, "Router already running",
@@ -350,7 +363,7 @@ class MainWindow(QMainWindow):
         if self._router.supervisor_pid() is not None:
             self._router.stop()
         else:
-            others = self._router.router_pids()["external"]
+            others = self._router.router_pids(fresh=True)["external"]
             if others and self._confirm(
                     "Stop external router?",
                     f"A router not started from this app is running (pid {', '.join(map(str, others))}). Stop it?"):
@@ -367,6 +380,7 @@ class MainWindow(QMainWindow):
             return False
         self._quitting = True
         self._monitor.stop()
+        self._scanner.shutdown(wait=False, cancel_futures=True)
         QApplication.quit()
         return True
 
@@ -435,7 +449,9 @@ class MainWindow(QMainWindow):
             state = "waiting"
         else:
             state = "stopped"
-        self.setWindowTitle(f"MAVLink Router: {state}")
+        title = f"MAVLink Router: {state}"
+        if title != self.windowTitle():
+            self.setWindowTitle(title)
 
         self._start_btn.setEnabled(not active)
         self._stop_btn.setEnabled(active)
@@ -482,7 +498,7 @@ class MainWindow(QMainWindow):
             self._input_row.set(GREEN, f"{name} open")
             return
 
-        holders = [h for h in device_holders(device) if h[0] != router]
+        holders = [h for h in self._cached_holders(device) if h[0] != router]
         if holders:
             color = RED if supervisor is not None else ORANGE
             self._input_row.set(color, f"held by {holders[0][1]}",
@@ -491,6 +507,27 @@ class MainWindow(QMainWindow):
             self._input_row.set(ORANGE, f"{name} connecting...")
         else:
             self._input_row.set(GRAY, f"{name} available")
+
+    def _cached_holders(self, device: str):
+        """Last known holders of the device.
+
+        device_holders() scans every process's open files (tens of ms), so it
+        runs in the background at most every HOLDERS_CACHE_S; until a result
+        for this device is in, report none.
+        """
+        scan = self._holders_scan
+        if scan is not None and scan.done():
+            self._holders_scan = None
+            try:
+                self._holders_cache = (scan.device, time.monotonic(), scan.result())
+            except OSError:
+                pass
+        cached_device, stamp, holders = self._holders_cache
+        stale = cached_device != device or time.monotonic() - stamp > HOLDERS_CACHE_S
+        if stale and self._holders_scan is None:
+            self._holders_scan = self._scanner.submit(device_holders, device)
+            self._holders_scan.device = device
+        return holders if cached_device == device else []
 
     def _refresh_link(self, router_running: bool):
         snap = self._monitor.snapshot()

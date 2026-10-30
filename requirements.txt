@@ -1,2 +1,1 @@
 PyQt6>=6.4
-pymavlink>=2.4

@@ -10,6 +10,9 @@ CONF="$2"
 CONF_DIR="$3"
 DEVICE="$4"
 child=""
+# Retry delay: doubles while the router keeps failing right away (e.g. port
+# busy), back to 1 s once a run lasted a while (e.g. after an unplug)
+delay=1
 
 trap '[ -n "$child" ] && kill "$child" 2>/dev/null; exit 0' TERM INT
 
@@ -24,10 +27,17 @@ while true; do
     fi
 
     echo "=== $(stamp) starting mavlink-routerd"
+    started=$(date +%s)
     "$ROUTERD" -c "$CONF" -d "$CONF_DIR" &
     child=$!
     wait "$child"
-    echo "=== $(stamp) mavlink-routerd exited (code $?), restarting"
+    code=$?
     child=""
-    sleep 1
+    if [ $(( $(date +%s) - started )) -ge 10 ]; then
+        delay=1
+    else
+        delay=$(( delay * 2 > 5 ? 5 : delay * 2 ))
+    fi
+    echo "=== $(stamp) mavlink-routerd exited (code $code), restarting in ${delay} s"
+    sleep "$delay"
 done

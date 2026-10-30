@@ -26,10 +26,8 @@ pyinstaller --noconfirm --clean --windowed \
     --add-data "$ROOT/link_manager/icon.svg:link_manager" \
     --add-data "$ROOT/link_manager/supervisor.sh:link_manager" \
     --paths "$ROOT" \
-    `# pymavlink imports these optionally; the app only needs mavutil` \
-    --exclude-module cv2 --exclude-module numpy --exclude-module matplotlib \
-    --exclude-module lxml --exclude-module PIL --exclude-module scipy \
-    --exclude-module pandas --exclude-module tkinter --exclude-module IPython \
+    `# not used; keeps stray site-packages out of the bundle` \
+    --exclude-module numpy --exclude-module tkinter \
     packaging/entry.py
 
 cp -r "$BUILD/dist/mavlink-router-app" "$APPDIR/usr/lib/"

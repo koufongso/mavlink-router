@@ -78,7 +78,7 @@ Runtime files (generated `active.conf`, the router output `router.log`, `supervi
 ## Run from source
 
 ```bash
-pip install -r requirements.txt   # PyQt6, pymavlink
+pip install -r requirements.txt   # PyQt6
 python3 -m link_manager
 ```
 

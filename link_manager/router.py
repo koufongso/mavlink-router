@@ -25,6 +25,9 @@ CONF_FILE = STATE_DIR / "active.conf"
 CONF_DIR = STATE_DIR / "conf.d"
 # Copied out of the package so it keeps working after an AppImage exits
 SUPERVISOR = STATE_DIR / "supervisor.sh"
+# Scanning all of /proc for routers started elsewhere is the slow part of a
+# status refresh, so it runs at most this often (and fresh on Start/Stop)
+EXTERNAL_SCAN_INTERVAL_S = 2.0
 CACHE_BIN = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "mavlink-router-app" / BINARY_NAME
 
 
@@ -85,6 +88,15 @@ def process_name(pid: int) -> str:
 
 def _pids() -> List[int]:
     return [int(e) for e in os.listdir("/proc") if e.isdigit()]
+
+
+def _children(pid: int) -> Optional[List[int]]:
+    """Child pids from /proc (one file read); None if the kernel doesn't provide it."""
+    try:
+        with open(f"/proc/{pid}/task/{pid}/children") as f:
+            return [int(p) for p in f.read().split()]
+    except (OSError, ValueError):
+        return None
 
 
 def _is_router(pid: int) -> bool:
@@ -148,6 +160,7 @@ class Router:
         CONF_DIR.mkdir(parents=True, exist_ok=True)
         # Set only when started in this session, so the child gets reaped
         self._proc: Optional[subprocess.Popen] = None
+        self._external_scan: Tuple[float, List[int]] = (float("-inf"), [])
         # Router output is only read to explain failures; start at the end so
         # errors from earlier runs aren't reported again
         self._log_offset = LOG_FILE.stat().st_size if LOG_FILE.exists() else 0
@@ -162,14 +175,25 @@ class Router:
             return None
         return pid if _is_supervisor(pid) else None
 
-    def router_pids(self) -> Dict[str, List[int]]:
-        """mavlink-routerd processes: "ours" (run by our supervisor) and "external"."""
+    def router_pids(self, fresh: bool = False) -> Dict[str, List[int]]:
+        """mavlink-routerd processes: "ours" (run by our supervisor) and "external".
+
+        "external" comes from a full /proc scan cached for EXTERNAL_SCAN_INTERVAL_S
+        unless fresh=True.
+        """
         sup = self.supervisor_pid()
-        result = {"ours": [], "external": []}
-        for pid in _pids():
-            if _is_router(pid):
-                result["ours" if sup is not None and _ppid(pid) == sup else "external"].append(pid)
-        return result
+        ours = []
+        if sup is not None:
+            children = _children(sup)
+            if children is None:
+                children = [p for p in _pids() if _ppid(p) == sup]
+            ours = [p for p in children if _is_router(p)]
+
+        now = time.monotonic()
+        if fresh or now - self._external_scan[0] > EXTERNAL_SCAN_INTERVAL_S:
+            self._external_scan = (now, [p for p in _pids() if _is_router(p) and p not in ours])
+        external = [p for p in self._external_scan[1] if p not in ours and _is_router(p)]
+        return {"ours": ours, "external": external}
 
     def start(self, conf_text: str, device: str = "") -> int:
         binary = find_binary()
