@@ -9,7 +9,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow,
-    QMessageBox, QPushButton, QSpinBox, QToolButton,
+    QMessageBox, QPushButton, QSpinBox, QStackedWidget, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -38,6 +38,7 @@ class StatusRow:
         grid.addWidget(self.dot, row, 0)
         grid.addWidget(QLabel(label), row, 1)
         grid.addWidget(self.detail, row, 2)
+        self.set(GRAY, "")  # not the default black until the first refresh
 
     def set(self, color: str, text: str, tooltip: str = ""):
         # Called every refresh; only touch the widgets when something changed
@@ -78,8 +79,8 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence.StandardKey.Quit, self, activated=self.close)
         self.setCentralWidget(central)
 
-        # Fixed width, measured while the (widest) serial-port rows are still
-        # visible, i.e. before _load_mode hides them for SITL
+        # Fixed size; the stacked mode pages are as large as the largest one,
+        # so the size fits every mode
         self._rebuild_endpoint_rows()
         self._input_box.setMinimumWidth(self._input_box.sizeHint().width())  # columns don't shift between modes
         self.setFixedWidth(max(self.sizeHint().width(), WINDOW_WIDTH))
@@ -101,11 +102,16 @@ class MainWindow(QMainWindow):
         self._mode_combo = QComboBox()
         for key, label in profiles.MODES.items():
             self._mode_combo.addItem(label, key)
-        self._mode_combo.currentIndexChanged.connect(
-            lambda: self._load_mode(self._mode_combo.currentData()))
-        grid.addWidget(QLabel("Mode"), 0, 0)
-        grid.addWidget(self._mode_combo, 0, 1, 1, 2)
+        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        mode_label = QLabel("Mode")
+        grid.addWidget(mode_label, 0, 0)
+        grid.addWidget(self._mode_combo, 0, 1)
 
+        # Mode-specific inputs on stacked pages: the stack is as tall as its
+        # tallest page, so the status below doesn't move when the mode changes
+        self._serial_page = QWidget()
+        serial_grid = QGridLayout(self._serial_page)
+        serial_grid.setContentsMargins(0, 0, 0, 0)
         self._device_label = QLabel("Port")
         self._device_combo = QComboBox()
         # Long by-id names shouldn't dictate the column width
@@ -115,24 +121,40 @@ class MainWindow(QMainWindow):
         self._rescan_btn.setText("⟳")
         self._rescan_btn.setToolTip("Rescan serial ports")
         self._rescan_btn.clicked.connect(self._rescan_ports)
-        grid.addWidget(self._device_label, 1, 0)
-        grid.addWidget(self._device_combo, 1, 1)
-        grid.addWidget(self._rescan_btn, 1, 2)
+        serial_grid.addWidget(self._device_label, 0, 0)
+        serial_grid.addWidget(self._device_combo, 0, 1)
+        serial_grid.addWidget(self._rescan_btn, 0, 2)
 
         self._baud_label = QLabel("Baud")
         self._baud_combo = QComboBox()
         self._baud_combo.setEditable(True)
         self._baud_combo.addItems(BAUD_RATES)
-        grid.addWidget(self._baud_label, 2, 0)
-        grid.addWidget(self._baud_combo, 2, 1, 1, 2)
+        serial_grid.addWidget(self._baud_label, 1, 0)
+        serial_grid.addWidget(self._baud_combo, 1, 1, 1, 2)
+        serial_grid.setColumnStretch(1, 1)
 
+        self._sitl_page = QWidget()
+        sitl_grid = QGridLayout(self._sitl_page)
+        sitl_grid.setContentsMargins(0, 0, 0, 0)
         self._udp_label = QLabel("UDP port")
         self._udp_spin = QSpinBox()
         self._udp_spin.setRange(1, 65535)
         self._udp_spin.setToolTip("Port PX4 SITL sends its GCS link to")
-        grid.addWidget(self._udp_label, 3, 0)
-        grid.addWidget(self._udp_spin, 3, 1, 1, 2)
+        sitl_grid.addWidget(self._udp_label, 0, 0)
+        sitl_grid.addWidget(self._udp_spin, 0, 1)
+        sitl_grid.setColumnStretch(1, 1)
+        sitl_grid.setRowStretch(1, 1)  # top-aligned; the serial page is a row taller
+
+        self._link_pages = QStackedWidget()
+        self._link_pages.addWidget(self._serial_page)
+        self._link_pages.addWidget(self._sitl_page)
+        grid.addWidget(self._link_pages, 1, 0, 1, 2)
         grid.setColumnStretch(1, 1)
+        # One label width on every page, so the inputs don't shift sideways either
+        labels = (mode_label, self._device_label, self._baud_label, self._udp_label)
+        label_width = max(label.sizeHint().width() for label in labels)
+        for label in labels:
+            label.setFixedWidth(label_width)
 
         status = QGridLayout()
         status.setColumnStretch(2, 1)
@@ -177,6 +199,10 @@ class MainWindow(QMainWindow):
     def _mode(self) -> str:
         return self._mode_combo.currentData()
 
+    def _on_mode_changed(self):
+        self._load_mode(self._mode())
+        self._refresh()  # the new endpoint rows show their status now, not on the next tick
+
     def _load_mode(self, mode: str):
         index = self._mode_combo.findData(mode)
         if index != self._mode_combo.currentIndex():
@@ -185,10 +211,7 @@ class MainWindow(QMainWindow):
             self._mode_combo.blockSignals(False)
 
         serial = mode in profiles.SERIAL_MODES
-        for w in (self._device_label, self._device_combo, self._rescan_btn, self._baud_label, self._baud_combo):
-            w.setVisible(serial)
-        self._udp_label.setVisible(not serial)
-        self._udp_spin.setVisible(not serial)
+        self._link_pages.setCurrentWidget(self._serial_page if serial else self._sitl_page)
 
         if serial:
             cfg = self._settings["serial"][mode]

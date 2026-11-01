@@ -27,6 +27,8 @@ HOLDERS_CACHE_S = 2.0
 # How far back to look for the errors of the latest failed attempt
 ERROR_SCAN_BYTES = 50_000
 LOG_TAIL_BYTES = 20_000
+SERIAL_FIELDS = ["mode", "port", "baud"]
+SITL_FIELDS = ["mode", "udp"]
 FIELD_LABELS = {"mode": "Mode", "port": "Port", "baud": "Baud", "udp": "UDP port"}
 KEYS = [("↑↓", "select"), ("←→", "change"), ("Enter", "edit"), ("s", "start"), ("x", "stop"),
         ("r", "rescan"), ("l", "log"), ("q", "quit")]
@@ -248,7 +250,7 @@ class Tui:
     # --- selection ----------------------------------------------------------
 
     def fields(self) -> list:
-        return ["mode", "port", "baud"] if self.mode in profiles.SERIAL_MODES else ["mode", "udp"]
+        return SERIAL_FIELDS if self.mode in profiles.SERIAL_MODES else SITL_FIELDS
 
     def load_mode(self, mode: str):
         self.mode = mode
@@ -455,16 +457,16 @@ class Tui:
         self.put(y, 1, "Vehicle link", curses.A_BOLD)
         values = {"mode": profiles.MODES[self.mode], "port": self.port_label(), "baud": str(self.baud),
                   "udp": str(self.udp_port)}
+        # Same number of rows in every mode and state, so nothing below moves
         for i, field in enumerate(self.fields()):
-            y += 1
             selected = i == self.field
-            self.put(y, 1, ">" if selected else " ", curses.A_BOLD)
-            self.put(y, 4, FIELD_LABELS[field])
+            self.put(y + 1 + i, 1, ">" if selected else " ", curses.A_BOLD)
+            self.put(y + 1 + i, 4, FIELD_LABELS[field])
             value = values[field] if locked else f"< {values[field]} >"
             attr = curses.A_DIM if locked else (curses.A_REVERSE if selected else 0)
-            self.put(y, 4 + self.label_width, value, attr)
+            self.put(y + 1 + i, 4 + self.label_width, value, attr)
+        y += len(SERIAL_FIELDS) + 1
         if locked:
-            y += 1
             self.put(y, 4 + self.label_width, "(stop the router to change)", curses.A_DIM)
 
         y += 1
