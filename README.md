@@ -66,6 +66,36 @@ Pixhawk TELEM1 ~ SiK ~ ground SiK (/dev/ttyUSB0) ──► this app, Flight mode
 Problems you need to fix yourself (no permission for the serial port, port busy, UDP port already taken) pop up once
 as a message with what to do. Unplugging doesn't: the router just waits and reconnects.
 
+## CLI (SSH / headless)
+
+```bash
+python3 -m link_manager cli
+```
+
+The GUI in a terminal: pick the mode, port and baud, press **s** to start, and watch the router, vehicle port,
+heartbeat, traffic and endpoints update live. Without a display (plain SSH), `python3 -m link_manager` opens it
+directly. With the AppImage (once rebuilt): `./MAVLink_Router-x86_64.AppImage cli`.
+
+| Key | |
+|-----|---|
+| ↑ ↓ / Tab | select a field |
+| ← → | change it (mode, port, baud from the list) |
+| Enter | type a value (a port by path or name like `ttyUSB0`, any baud, the SITL UDP port) |
+| s / x | start / stop the router |
+| r | rescan serial ports |
+| l | show the router log |
+| d | dismiss error messages |
+| q | quit: asks whether to stop the router or keep it running |
+
+It only needs Python 3 and `mavlink-routerd` (it uses Python's built-in curses, no PyQt6).
+
+It drives the same detached router, settings and state files as the GUI, so you can mix them: start the router over
+SSH and the GUI shows it running, or the other way round. Because the router is detached, a dropped SSH connection
+doesn't drop the vehicle link; open the CLI again and it picks up the running router.
+
+Only one program can listen on the monitor port (14599). While the GUI is open, the CLI shows the heartbeat as
+"port 14599 taken" and the GUI's window shows it instead; everything else works the same.
+
 ## Configuration
 
 Settings live in `~/.config/mavlink-router-app/settings.json` (**Open config folder** in the app); it's written with the
