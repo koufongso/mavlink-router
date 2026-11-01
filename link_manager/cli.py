@@ -109,12 +109,11 @@ def status_rows(router: Router, settings: dict, monitor: LinkMonitor, holders=de
     rows.append(input_row(mode, device, settings, supervisor, pid, holders))
 
     snap = monitor.snapshot()
-    if snap.error:
-        if "in use" in snap.error:
-            # The GUI holds the monitor endpoint; only one listener gets the traffic
-            rows.append((OFF, "Heartbeat", f"port {profiles.MONITOR_PORT} taken (GUI open? it shows the heartbeat)"))
-        else:
-            rows.append((BAD, "Heartbeat", snap.error))
+    if snap.port_busy:
+        # Only one listener gets the monitor traffic; the monitor takes over once the other app closes
+        rows.append((OFF, "Heartbeat", "port occupied"))
+    elif snap.error:
+        rows.append((BAD, "Heartbeat", snap.error))
     elif not running:
         rows.append((OFF, "Heartbeat", "-"))
     elif snap.heartbeat_age_s is None:

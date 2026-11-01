@@ -465,7 +465,12 @@ class MainWindow(QMainWindow):
 
     def _refresh_link(self, router_running: bool):
         snap = self._monitor.snapshot()
-        if snap.error:
+        if snap.port_busy:
+            # Only one listener gets the monitor traffic; the monitor takes over once the other app closes
+            self._heartbeat_row.set(GRAY, "port occupied",
+                                    f"Port {profiles.MONITOR_PORT} is held by the other MAVLink Router app (GUI or "
+                                    "CLI); the heartbeat shows here as soon as that one closes")
+        elif snap.error:
             self._heartbeat_row.set(RED, snap.error)
         elif not router_running:
             self._heartbeat_row.set(GRAY, "-")
@@ -476,7 +481,7 @@ class MainWindow(QMainWindow):
         else:
             self._heartbeat_row.set(GREEN, f"sysid {snap.sysid}, {snap.heartbeat_hz:.1f} Hz")
 
-        if router_running:
+        if router_running and not snap.error:
             self._traffic_row.set(GREEN if snap.msgs_per_s > 0 else GRAY, f"{snap.msgs_per_s:.0f} msg/s")
         else:
             self._traffic_row.set(GRAY, "-")

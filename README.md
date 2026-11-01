@@ -93,8 +93,9 @@ It drives the same detached router, settings and state files as the GUI, so you 
 SSH and the GUI shows it running, or the other way round. Because the router is detached, a dropped SSH connection
 doesn't drop the vehicle link; open the CLI again and it picks up the running router.
 
-Only one program can listen on the monitor port (14599). While the GUI is open, the CLI shows the heartbeat as
-"port 14599 taken" and the GUI's window shows it instead; everything else works the same.
+Only one program can listen on the monitor port (14599), so with both the GUI and the CLI open, the heartbeat and
+traffic show in the one opened first; the other says "port occupied" and takes over within a second
+once that one closes. Everything else works the same in both.
 
 ## Configuration
 

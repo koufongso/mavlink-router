@@ -4,6 +4,7 @@ Only MAVLink frame headers are parsed (no pymavlink): that's enough to count
 messages and spot vehicle heartbeats, and stays cheap at any message rate.
 """
 
+import errno
 import socket
 import threading
 import time
@@ -19,6 +20,8 @@ HEARTBEAT_AUTOPILOT_OFFSET = 5  # payload: custom_mode(4) type(1) autopilot(1) .
 MAV_AUTOPILOT_INVALID = 8
 GCS_SYSID = 255
 RATE_WINDOW_S = 5.0
+# The port is taken while the other app (GUI or CLI) runs; take over once it closes
+BIND_RETRY_S = 1.0
 
 
 def parse_frames(data: bytes) -> Iterator[Tuple[int, int, bytes]]:
@@ -78,6 +81,7 @@ class RateWindow:
 @dataclass
 class LinkSnapshot:
     error: str = ""
+    port_busy: bool = False  # the monitor port is held by another app, e.g. the GUI while this is the CLI
     sysid: Optional[int] = None
     heartbeat_age_s: Optional[float] = None
     heartbeat_hz: float = 0.0
@@ -91,6 +95,7 @@ class LinkMonitor(threading.Thread):
         self._lock = threading.Lock()
         self._running = True
         self._error = ""
+        self._port_busy = False
         self._sysid: Optional[int] = None
         self._last_hb = 0.0
         self._heartbeats = RateWindow(RATE_WINDOW_S)
@@ -99,14 +104,28 @@ class LinkMonitor(threading.Thread):
     def stop(self):
         self._running = False
 
-    def run(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            sock.bind(("127.0.0.1", self._port))
-        except OSError as e:
+    def _bind(self) -> Optional[socket.socket]:
+        """Bind the monitor port, retrying until it's free; None if stopped first."""
+        while self._running:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sock.bind(("127.0.0.1", self._port))
+            except OSError as e:
+                sock.close()
+                with self._lock:
+                    self._error = f"monitor port {self._port}: {e.strerror}"
+                    self._port_busy = e.errno == errno.EADDRINUSE
+                time.sleep(BIND_RETRY_S)
+                continue
             with self._lock:
-                self._error = f"monitor port {self._port}: {e.strerror}"
-            sock.close()
+                self._error = ""
+                self._port_busy = False
+            return sock
+        return None
+
+    def run(self):
+        sock = self._bind()
+        if sock is None:
             return
         sock.settimeout(0.5)
 
@@ -139,6 +158,7 @@ class LinkMonitor(threading.Thread):
         with self._lock:
             return LinkSnapshot(
                 error=self._error,
+                port_busy=self._port_busy,
                 sysid=self._sysid,
                 heartbeat_age_s=(now - self._last_hb) if self._last_hb else None,
                 heartbeat_hz=self._heartbeats.rate(now),
